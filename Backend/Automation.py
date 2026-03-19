@@ -1,387 +1,451 @@
-# Import required libraries
-from AppOpener import close, open as appopen  # Import functions to open and close apps.
-from webbrowser import open as webopen # Import web browser functionality.
-from pywhatkit import search, playonyt # Import functions for Google search and YouTube playback.
-from dotenv import dotenv_values # Import dotenv to manage environment variables.
-from bs4 import BeautifulSoup # Import BeautifulSoup for parsing HTML content.
-from rich import print # Import rich for styled console output.
-from groq import Groq # Import Groq for AI chat functionalities.
-import webbrowser # Import webbrowser for open opening URLS.
-import subprocess # Import subprocess for interacting with the system.
-import requests # Import requests for making HTTP reque requests.
-import keyboard # Import keyboard for keyboard-related actions.
-import asyncio # Import asyncio for asynchronous programming.
-import os # Import os for operating system functionalities.
-
-# Load environment variables from the .env file.
-
-env_vars=dotenv_values(".env")
-GroqAPIKey=env_vars.get("GroqAPIKey") # Retrieve the Groq API key.
-
-# Define CSS classes for parsing specific elements in HTML content.
-classes = ["zCubwf", "hgKElc", "LTK00 SY7ric", "ZOLCW", "gsrt vk_bk FzvWSb YwPhnf", "pclqee", "tw-Data-text tw-text-small tw-ta",
-            "IZ6rdc", "05uR6d LTK00", "vlzY6d", "webanswers-webanswers_table_webanswers-table", "dDoNo ikb4Bb gsrt", "sXLa0e",
-            "LWkfKe", "VQF4g", "qv3Wpe", "kno-rdesc", "SPZz6b"]
-
-# Define a user-agent for making web requests.
-useragent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.4896.75 Safari/537.36'
-
-# Initialize the Groq client with the API key.
-client = Groq(api_key=GroqAPIKey)
-
-# Predefined professional responses for user interactions.
-professional_responses = [
-    "Your satisfaction is my top priority; feel free to reach out if there's anything else I can help you with.",
-    "I'm at your service for any additional questions or support you may need-don't hesitate to ask.",
-]
-
-# List to store chatbot messages.
-messages = []
-
-# System message to provide context to the chatbot.
-SystemChatBot = [{"role": "system", "content": f"Hello, I am {os.environ['Username']}, You're a content writer. You have to write content like letters, codes, applications, essays, notes, songs, poems etc."}]
-
-# Function to perform a Google search.
-def GoogleSearch(Topic):
-    search(Topic) # Use pywhatkit's search function to perform a Google search.
-    return True # Indicate success.
-
-# Function to generate content using AI and save it to a file.
-def Content(Topic):
-
-    # Nested function to open a file in Notepad.
-    def OpenNotepad (File):
-        default_text_editor = 'notepad.exe' # Default text editor.
-        subprocess.Popen([default_text_editor, File]) # Open the file in Notepad.
-
-    # Nested function to generate content using the AI chatbot.
-    def ContentWriterAI(prompt):
-        messages.append({"role": "user", "content": f"{prompt}"})  # Add the user's prompt to messages.
-
-        completion = client.chat.completions.create(
-            model="llama-3.1-8b-instant",# Specify the AI model,.....old model: "mixtral-8x7b-32768"
-            messages = SystemChatBot + messages,  # Include system instructions and chat history.
-            max_tokens=2048,  # Limit the maximum tokens in the response.
-            temperature=0.7,  # Adjust response randomness.
-            top_p=1,  # Use nucleus sampling for response diversity.
-            stream=True,  # Enable streaming response.
-            stop=None  # Allow the model to determine stopping conditions.
-        )
-
-        Answer = ""  # Initialize an empty string for the response.
-
-        # Process streamed response chunks.
-        for chunk in completion:
-            if chunk.choices[0].delta.content:  # Check for content in the current chunk.
-                Answer += chunk.choices[0].delta.content  # Append the content to the answer.
-
-        Answer = Answer.replace("</s>", "")  # Remove unwanted tokens from the response.
-        messages.append({"role": "assistant", "content": Answer})  # Add the AI's response to messages.
-        return Answer
-
-    Topic: str = Topic.replace("Content ", "")  # Remove "Content" from the topic.
-    ContentByAI = ContentWriterAI(Topic)  # Generate content using AI.
-
-    # Save the generated content to a text file.
-    with open(rf"Data\{Topic.lower().replace(' ', '')}.txt", "w", encoding="utf-8") as file:
-        file.write(ContentByAI)  # Write the content to the file.
-        file.close()
-
-    OpenNotepad(rf"Data\{Topic.lower().replace(' ', '')}.txt")  # Open the file in Notepad.
-    return True  # Indicate success.
-
-# Function to search for a topic on YouTube.
-def YouTubeSearch(Topic):
-        Url4Search = f"https://www.youtube.com/results?search_query={Topic}"  # Construct the YouTube search URL.
-        webbrowser.open(Url4Search)  # Open the search URL in a web browser.
-        return True  # Indicate success.
-
-# Function to play a video on YouTube.
-def PlayYoutube(query):
-    playonyt(query)  # Use pywhatkit's playonyt function to play the video.
-    return True  # Indicate success.
-
-
-
-# --- Add this helper inside your OpenApp.py or above OpenApp function ---
-
+"""
+Ultra-Fast Automation - YOUR CHROME PROFILE Edition
+====================================================
+Uses YOUR existing Chrome browser with all your logins and sessions!
+"""
 
 import os
 import sys
-import webbrowser
-import socket
-import subprocess
-import requests
-from shutil import which
+import time
+import asyncio
+import logging
+import platform
+from pathlib import Path
+from typing import List, Dict, Optional, Any
+from dataclasses import dataclass
+from enum import Enum
+import re
 
-# --- Step 0: Helper function to get official site from LLM ---
-from duckduckgo_search import DDGS
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.chrome.options import Options
+from selenium.common.exceptions import TimeoutException
 
-def GetOfficialWebsite(app_name: str) -> str:
+from groq import Groq
+from dotenv import dotenv_values
+
+logging.basicConfig(level=logging.WARNING)
+logger = logging.getLogger(__name__)
+
+
+class TaskStatus(Enum):
+    SUCCESS = "success"
+    FAILED = "failed"
+
+
+@dataclass
+class TaskResult:
+    status: TaskStatus
+    message: str
+    error: Optional[str] = None
+
+
+def get_chrome_profile_path():
     """
-    Gets the official website for an app/service using DuckDuckGo search.
-    Free, no API key required.
+    Automatically detect Chrome user data directory for your OS.
     """
-    try:
-        with DDGS() as ddgs:
-            results = list(ddgs.text(app_name + " official site", max_results=5))
-            for r in results:
-                url = r.get("href") or r.get("url")
-                if url and url.startswith("http"):
-                    return url
-    except Exception as e:
-        print(f"[Search Error] {e}")
-    return ""
-
-
-
-def OpenApp(app, sess=requests.session()):
-    """
-    Attempts to open a specified application. 
-    If unsuccessful, resolves and opens a corresponding website.
-    """
-
-    app = app.strip()
-    if app.lower().startswith("open "):
-        app = app[5:].strip()
-
-    # --- Step 1: Try to launch as application ---
-    def try_launch_app(app_name: str) -> bool:
-        if sys.platform.startswith("win"):  # Windows
-            try:
-                os.startfile(app_name)
-                return True
-            except Exception:
-                pass
-        if sys.platform.startswith("darwin"):  # macOS
-            try:
-                subprocess.Popen(["open", "-a", app_name])
-                return True
-            except Exception:
-                pass
-        if which(app_name):  # Linux / Unix
-            try:
-                subprocess.Popen([app_name])
-                return True
-            except Exception:
-                pass
-        return False
-
-    # --- Step 2: Try official site via LLM ---
-    official_site = GetOfficialWebsite(app)
-    if official_site:
-        try:
-            webbrowser.open(official_site)
-            print(f"[Official Website Opened] {official_site}")
-            return True
-        except Exception as e:
-            print(f"[Error Opening Official Website] {official_site} -> {e}")
-
-    # --- Step 3: Try to resolve domain manually ---
-    def domain_resolves(domain: str, timeout=2) -> bool:
-        try:
-            socket.setdefaulttimeout(timeout)
-            socket.gethostbyname(domain)
-            return True
-        except Exception:
-            return False
-
-    candidates = [app, f"www.{app}"]
-    tlds = ["com", "org", "net", "io", "bd", "gov"]
-    for tld in tlds:
-        candidates.append(f"{app}.{tld}")
-        candidates.append(f"www.{app}.{tld}")
-
-    for dom in candidates:
-        if domain_resolves(dom):
-            url = dom if dom.startswith(("http://", "https://")) else "https://" + dom
-            try:
-                webbrowser.open(url)
-                print(f"[Website Opened] {url}")
-                return True
-            except Exception as e:
-                print(f"[Error Opening Website] {url} -> {e}")
-
-    # --- Step 4: Fallback search ---
-    try:
-        search_url = f"https://www.google.com/search?q={app}"
-        webbrowser.open(search_url)
-        print(f"[Fallback Search] {search_url}")
-        return True
-    except Exception as e:
-        print(f"[Error Search Fallback] {e}")
-        return False
-
-
-# Example usage:
-# OpenApp("youtube")
-
-
-#penApp("youtube")
+    system = platform.system()
     
+    if system == "Windows":
+        # Windows paths
+        paths = [
+            os.path.join(os.environ.get('LOCALAPPDATA', ''), 'Google', 'Chrome', 'User Data'),
+            os.path.join(os.environ.get('APPDATA', ''), 'Google', 'Chrome', 'User Data'),
+        ]
+    elif system == "Darwin":  # macOS
+        paths = [
+            os.path.expanduser('~/Library/Application Support/Google/Chrome'),
+        ]
+    else:  # Linux
+        paths = [
+            os.path.expanduser('~/.config/google-chrome'),
+            os.path.expanduser('~/.config/chromium'),
+        ]
+    
+    # Find first existing path
+    for path in paths:
+        if os.path.exists(path):
+            logger.info(f"Found Chrome profile at: {path}")
+            return path
+    
+    logger.warning("Chrome profile path not found - using default")
+    return None
 
 
+class FastCommandParser:
+    """Lightning-fast regex command parser."""
+    
+    def __init__(self):
+        self.patterns = {
+            'open_youtube': re.compile(r'\bopen\s+youtube\b', re.I),
+            'search_youtube': re.compile(r'\bsearch\s+(?:youtube\s+)?for\s+["\']?(.+?)["\']?(?:\s+(?:and|,)|$)', re.I),
+            'play_video': re.compile(r'\bplay\s+(?:the\s+)?(?:first\s+)?video\b', re.I),
+            'like_video': re.compile(r'\blike\s+(?:the\s+)?(?:it|video)\b', re.I),
+            'comment': re.compile(r'\bcomment\s+["\'](.+?)["\']', re.I),
+            'open_site': re.compile(r'\b(?:open|go\s+to)\s+([a-zA-Z0-9.-]+\.com)\b', re.I),
+            'google_search': re.compile(r'\b(?:google\s+)?search\s+(?:for\s+)?["\']?(.+?)["\']?(?:\s+(?:and|,)|$)', re.I),
+        }
+    
+    def parse(self, command: str) -> List[Dict[str, Any]]:
+        """Parse command using regex - INSTANT!"""
+        actions = []
+        
+        if self.patterns['open_youtube'].search(command):
+            actions.append({'action': 'open_youtube'})
+        
+        search_match = self.patterns['search_youtube'].search(command)
+        if search_match:
+            query = search_match.group(1).strip(' ,')
+            actions.append({'action': 'search_youtube', 'query': query})
+        
+        if self.patterns['play_video'].search(command):
+            actions.append({'action': 'play_first_video'})
+        
+        if self.patterns['like_video'].search(command):
+            actions.append({'action': 'like_video'})
+        
+        comment_match = self.patterns['comment'].search(command)
+        if comment_match:
+            text = comment_match.group(1)
+            actions.append({'action': 'post_comment', 'text': text})
+        
+        site_match = self.patterns['open_site'].search(command)
+        if site_match and not actions:
+            url = site_match.group(1)
+            actions.append({'action': 'open_website', 'url': url})
+        
+        google_match = self.patterns['google_search'].search(command)
+        if google_match and 'search_youtube' not in [a['action'] for a in actions]:
+            query = google_match.group(1).strip(' ,')
+            actions.append({'action': 'google_search', 'query': query})
+        
+        return actions
 
-# Function to close an application.
-def CloseApp(app):
 
-
-    if app.strip() == "chrome":
-        pass # Skip if the app is Chrome.
-    else:
+class YourChromeEngine:
+    """
+    Uses YOUR existing Chrome browser with YOUR profile!
+    - Already logged into YouTube ✓
+    - Your bookmarks ✓
+    - Your history ✓
+    - Your extensions ✓
+    """
+    
+    def __init__(self, profile_name: str = "Default", user_data_dir: str = None):
+        """
+        Initialize with YOUR Chrome profile.
+        
+        Args:
+            profile_name: Chrome profile name (Default, Profile 1, Profile 2, etc.)
+            user_data_dir: Optional custom Chrome user data directory
+        """
+        self.driver = None
+        self.profile_name = profile_name
+        self.user_data_dir = user_data_dir or get_chrome_profile_path()
+        self._setup_driver()
+    
+    def _setup_driver(self):
+        """Setup Chrome using YOUR profile."""
+        chrome_options = Options()
+        
+        # USE YOUR CHROME PROFILE!
+        if self.user_data_dir:
+            chrome_options.add_argument(f"user-data-dir={self.user_data_dir}")
+            chrome_options.add_argument(f"profile-directory={self.profile_name}")
+            print(f"✓ Using your Chrome profile: {self.profile_name}")
+            print(f"✓ Location: {self.user_data_dir}")
+        
+        # Performance optimizations (but keep your extensions!)
+        chrome_options.add_argument('--no-sandbox')
+        chrome_options.add_argument('--disable-dev-shm-usage')
+        
+        # Don't load images for speed (optional - comment out if you want images)
+        # chrome_options.add_argument('--blink-settings=imagesEnabled=false')
+        
+        # Disable automation flags
+        chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        chrome_options.add_experimental_option('useAutomationExtension', False)
+        
         try:
-            close(app, match_closest =True, output=True, throw_error=True) # Attempt to close the app.
-            return True # Indicate success.
+            self.driver = webdriver.Chrome(options=chrome_options)
+            print("✓ Browser opened with YOUR profile!")
+        except Exception as e:
+            print(f"✗ Error: {e}")
+            print("\nTroubleshooting:")
+            print("1. Make sure Chrome is NOT already running")
+            print("2. Close all Chrome windows and try again")
+            print("3. Or use a different profile name")
+            raise
+    
+    def fast_wait(self, selector: str, by: By = By.CSS_SELECTOR, timeout: int = 5) -> Any:
+        """Fast wait for element."""
+        try:
+            return WebDriverWait(self.driver, timeout).until(
+                EC.presence_of_element_located((by, selector))
+            )
+        except TimeoutException:
+            return None
+    
+    def instant_click(self, element) -> bool:
+        """Instant click."""
+        try:
+            element.click()
+            return True
         except:
-            return False # Indicate failure.
+            try:
+                self.driver.execute_script("arguments[0].click();", element)
+                return True
+            except:
+                return False
+    
+    def fast_type(self, element, text: str) -> bool:
+        """Fast typing."""
+        try:
+            element.clear()
+            element.send_keys(text)
+            return True
+        except:
+            return False
+    
+    def close(self):
+        """Close browser."""
+        if self.driver:
+            self.driver.quit()
 
-# Function to execute system-level commands.
-def System(command):
 
-    # Nested function to mute the system volume.
-    def mute():
-        keyboard.press_and_release("volume mute") # Simulate the mute key press.
-
-    # Nested function to unmute the system volume.
-    def unmute():
-        keyboard.press_and_release("volume mute") # Simulate the unmute key press.
-
-    # Nested function to increase the system volume.
-    def volume_up():
-        keyboard.press_and_release("volume up") # Simulate the volume up key press.
-
-    # Nested function to decrease the system volume.
-    def volume_down():
-        keyboard.press_and_release("volume down") # Simulate the volume down key press.
-
-    # Execute the appropriate command.
-    if command == "mute":
-        mute()
-    elif command == "unmute":
-        unmute()
-    elif command == "volume up":
-        volume_up()
-    elif command == "volume down":
-        volume_down()
-
-    return True # Indicate success.
-
-# Asynchronous function to translate and execute user commands.
-async def TranslateAndExecute(commands: list [str]):
-
-    funcs = [] # List to store asynchronous tasks.
-
-    for command in commands:
-
-        if command.startswith("open "): # Handle "open" commands.
-
-            if "open it" in command: # Ignore "open it" commands.
-                pass
-
-            if "open file" == command: # Ignore "open file" commands.
-                pass
-
+class TurboYouTube:
+    """Ultra-fast YouTube automation."""
+    
+    def __init__(self, engine: YourChromeEngine):
+        self.engine = engine
+        self.driver = engine.driver
+    
+    def open(self) -> TaskResult:
+        """Open YouTube."""
+        try:
+            self.driver.get("https://www.youtube.com")
+            time.sleep(0.5)
+            return TaskResult(TaskStatus.SUCCESS, "YouTube opened")
+        except Exception as e:
+            return TaskResult(TaskStatus.FAILED, "Failed", str(e))
+    
+    def search(self, query: str) -> TaskResult:
+        """Search YouTube."""
+        try:
+            search_box = (
+                self.engine.fast_wait("input#search", timeout=3) or
+                self.engine.fast_wait("input[name='search_query']", timeout=2)
+            )
+            
+            if not search_box:
+                return TaskResult(TaskStatus.FAILED, "Search box not found")
+            
+            self.engine.fast_type(search_box, query)
+            search_box.send_keys(Keys.RETURN)
+            time.sleep(1)
+            
+            return TaskResult(TaskStatus.SUCCESS, f"Searched: {query}")
+        except Exception as e:
+            return TaskResult(TaskStatus.FAILED, "Search failed", str(e))
+    
+    def play_first(self) -> TaskResult:
+        """Play first video."""
+        try:
+            time.sleep(1)
+            videos = self.driver.find_elements(By.CSS_SELECTOR, "a#video-title")
+            
+            if not videos:
+                return TaskResult(TaskStatus.FAILED, "No videos found")
+            
+            self.engine.instant_click(videos[0])
+            time.sleep(1)
+            
+            return TaskResult(TaskStatus.SUCCESS, "Video playing")
+        except Exception as e:
+            return TaskResult(TaskStatus.FAILED, "Play failed", str(e))
+    
+    def like(self) -> TaskResult:
+        """Like video."""
+        try:
+            time.sleep(1)
+            
+            like_btn = (
+                self.engine.fast_wait("like-button-view-model button", timeout=3) or
+                self.engine.fast_wait("ytd-toggle-button-renderer button", timeout=2)
+            )
+            
+            if like_btn:
+                self.engine.instant_click(like_btn)
+                return TaskResult(TaskStatus.SUCCESS, "Video liked")
             else:
-                fun = asyncio.to_thread(OpenApp, command.removeprefix("open ")) # Schedule app opening.
-                funcs.append(fun)
+                return TaskResult(TaskStatus.FAILED, "Like button not found")
+        except Exception as e:
+            return TaskResult(TaskStatus.FAILED, "Like failed", str(e))
+    
+    def comment(self, text: str) -> TaskResult:
+        """Post comment - NOW WORKS because you're logged in!"""
+        try:
+            # Scroll to comments
+            self.driver.execute_script("window.scrollBy(0, 500);")
+            time.sleep(1)
+            
+            # Click comment box
+            comment_box = self.engine.fast_wait("div#placeholder-area", timeout=3)
+            if not comment_box:
+                return TaskResult(TaskStatus.FAILED, "Comment box not found")
+            
+            self.engine.instant_click(comment_box)
+            time.sleep(0.5)
+            
+            # Type comment
+            input_field = self.engine.fast_wait("div#contenteditable-root", timeout=2)
+            if input_field:
+                input_field.send_keys(text)
+                time.sleep(0.5)
+                
+                # Post button
+                post_btn = self.engine.fast_wait("ytd-button-renderer#submit-button button", timeout=2)
+                if post_btn:
+                    self.engine.instant_click(post_btn)
+                    return TaskResult(TaskStatus.SUCCESS, "Comment posted!")
+            
+            return TaskResult(TaskStatus.FAILED, "Comment field not found")
+        except Exception as e:
+            return TaskResult(TaskStatus.FAILED, "Comment failed", str(e))
 
-        elif command.startswith("general"): # Placeholder for general commands.
-            pass
 
-        elif command.startswith("realtime "): # Placeholder for real-time commands.
-            pass
+class YourBrowserAutomation:
+    """
+    FAST automation using YOUR browser profile!
+    """
+    
+    def __init__(self, profile_name: str = "Default", user_data_dir: str = None):
+        """
+        Initialize with YOUR Chrome profile.
+        
+        Args:
+            profile_name: Your Chrome profile (Default, Profile 1, Profile 2, etc.)
+            user_data_dir: Optional custom Chrome directory
+        """
+        self.engine = YourChromeEngine(profile_name, user_data_dir)
+        self.youtube = TurboYouTube(self.engine)
+        self.parser = FastCommandParser()
+    
+    async def execute(self, command: str) -> List[TaskResult]:
+        """Execute command FAST using YOUR browser!"""
+        results = []
+        
+        # Instant regex parsing
+        actions = self.parser.parse(command)
+        
+        if not actions:
+            results.append(TaskResult(TaskStatus.FAILED, "Could not parse command"))
+            return results
+        
+        # Execute actions
+        for action_data in actions:
+            action = action_data.get('action')
+            
+            try:
+                if action == 'open_youtube':
+                    result = self.youtube.open()
+                    
+                elif action == 'search_youtube':
+                    result = self.youtube.search(action_data['query'])
+                    
+                elif action == 'play_first_video':
+                    result = self.youtube.play_first()
+                    
+                elif action == 'like_video':
+                    result = self.youtube.like()
+                    
+                elif action == 'post_comment':
+                    result = self.youtube.comment(action_data['text'])
+                    
+                elif action == 'open_website':
+                    url = action_data['url']
+                    if not url.startswith('http'):
+                        url = 'https://' + url
+                    self.engine.driver.get(url)
+                    result = TaskResult(TaskStatus.SUCCESS, f"Opened {url}")
+                    
+                elif action == 'google_search':
+                    query = action_data['query']
+                    url = f"https://www.google.com/search?q={query}"
+                    self.engine.driver.get(url)
+                    result = TaskResult(TaskStatus.SUCCESS, f"Searched: {query}")
+                    
+                else:
+                    result = TaskResult(TaskStatus.FAILED, f"Unknown: {action}")
+                
+                results.append(result)
+                
+            except Exception as e:
+                results.append(TaskResult(TaskStatus.FAILED, f"Failed: {action}", str(e)))
+        
+        return results
+    
+    def cleanup(self):
+        """Close browser."""
+        self.engine.close()
 
-        elif command.startswith("close"): # Handle "close" commands.
-            fun = asyncio.to_thread (CloseApp, command.removeprefix("close")) # Schedule app closing.
-            funcs.append(fun)
 
-        elif command.startswith("play "): # Handle "play" commands.
-            fun = asyncio.to_thread (PlayYoutube, command.removeprefix("play")) # Schedule YouTube playback.
-            funcs.append(fun)
+# ============================================================================
+# SIMPLE USAGE - YOUR BROWSER!
+# ============================================================================
 
-        elif command.startswith("content"): # Handle "content" commands.
-            fun = asyncio.to_thread(Content, command.removeprefix("content")) # Schedule content creation.
-            funcs.append(fun)
-
-        elif command.startswith("google search "): # Handle Google search commands.
-            fun = asyncio.to_thread(GoogleSearch, command.removeprefix("google search ")) # Schedule Google search.
-            funcs.append(fun)
-
-        elif command.startswith("youtube search "): # Handle YouTube search commands.
-            fun = asyncio.to_thread(YouTubeSearch, command.removeprefix("youtube search ")) # Schedule YouTube search.
-            funcs.append(fun)
-
-        elif command.startswith("system"): # Handle system commands.
-            fun = asyncio.to_thread(System, command.removeprefix("system ")) # Schedule system command.
-            funcs.append(fun)
-
-        else:
-            print (f"No Function Found. For {command}") # Print an error for unrecognized commands.
-
-    results = await asyncio.gather(*funcs) # Execete all tasks concurrently.
-
-    for result in results:
-        if isinstance(result, str):
-            yield result
-        else:
-            yield result
-
-# Asynchronous function to automate command execution.
-async def Automation (commands: list[str]):
-    async for result in TranslateAndExecute(commands): # Translate and execute commands.
-        pass
-
-    return True # Indicate success.
+async def main():
+    """Demo using YOUR Chrome profile."""
+    
+    print("""
+    ╔════════════════════════════════════════════════════════════╗
+    ║                                                            ║
+    ║         Ultra-Fast Automation - YOUR BROWSER              ║
+    ║                                                            ║
+    ╚════════════════════════════════════════════════════════════╝
+    
+    This will use YOUR Chrome profile with:
+    ✓ Your YouTube login
+    ✓ Your bookmarks
+    ✓ Your history
+    ✓ Your extensions
+    
+    NOTE: Close ALL Chrome windows before running!
+    """)
+    
+    input("Press Enter to start...")
+    
+    # Initialize with YOUR profile
+    # Common profile names: "Default", "Profile 1", "Profile 2", etc.
+    system = YourBrowserAutomation(profile_name="Default")
+    
+    try:
+        # Example command
+        command = "open youtube, search for python programming, play first video, like it"
+        
+        print(f"\n🚀 Executing: {command}\n")
+        
+        start_time = time.time()
+        results = await system.execute(command)
+        elapsed = time.time() - start_time
+        
+        # Print results
+        for i, result in enumerate(results, 1):
+            status_emoji = "✓" if result.status == TaskStatus.SUCCESS else "✗"
+            print(f"{status_emoji} {i}. {result.message}")
+        
+        print(f"\n⚡ Completed in {elapsed:.2f} seconds!")
+        print("\n💡 Notice: You're already logged into YouTube!")
+        print("   Try commenting - it will work!")
+        
+        input("\nPress Enter to close...")
+        
+    finally:
+        system.cleanup()
 
 
 if __name__ == "__main__":
-    asyncio.run(Content("Content how to create a youtube cahnnel"))
-
-
-
-"""def OpenApp(app, sess=requests.session()):
-    
-    '''Attempts to open a specified application. If unsuccessful, performs a Bing search
-    and opens the most relevant webpage.
-    
-    Args:
-        app (str): Name of the application to open.
-        sess (requests.Session, optional): A session object for making HTTP requests. Defaults to a new session.
-    
-    Returns:
-        bool: True if an application or webpage was opened successfully, False otherwise.'''
-    
-    try:
-        # Attempt to open the application
-        appopen(app, match_closest=True, output=True, throw_error=True)
-        return True
-    except Exception:
-        # Extract links from HTML content
-        def extract_links(html):
-            if not html:
-                return []
-            soup = BeautifulSoup(html, 'html.parser')
-            return [a['href'] for a in soup.find_all('a', href=True) if a['href'].startswith("http")]
-        
-        # Perform a Bing search
-        def search_bing(query):
-            url = f"https://www.bing.com/search?q={query}"
-            headers = {"User-Agent": "Mozilla/5.0"}  
-            time.sleep(2)  
-            response = sess.get(url, headers=headers)
-            return response.text if response.status_code == 200 else None
-        
-        html = search_bing(app)
-        
-        if html:
-            links = extract_links(html)
-            if links:
-                webbrowser.open(links[0])  # Open the first valid search result
-                return True
-    
-    return False  # Indicate failure
-
-
-
-
-#penApp("youtube")"""
+    asyncio.run(main())
