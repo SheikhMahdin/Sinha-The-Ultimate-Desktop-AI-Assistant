@@ -1,0 +1,30 @@
+[
+  {
+    "role": "assistant",
+    "content": "The current temperature in Dhaka, Bangladesh is +21\u00b0C, as of March 19, 2026, at 23:05."
+  },
+  {
+    "role": "user",
+    "content": "what is my current location?"
+  },
+  {
+    "role": "assistant",
+    "content": "Your current location is Dhaka, Bangladesh."
+  },
+  {
+    "role": "user",
+    "content": "give me more specific."
+  },
+  {
+    "role": "assistant",
+    "content": "Your current location is not specified, I don't have real-time access to your location."
+  },
+  {
+    "role": "user",
+    "content": "what is my ip address?"
+  },
+  {
+    "role": "assistant",
+    "content": "The search results provided do not include your specific IP address. To find your IP address, you can visit one of the websites listed, such as WhatIsMyIP.io or ThisIsMyIP.com, which can provide you with your public IP address information."
+  }
+]
