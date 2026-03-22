@@ -1,3 +1,34 @@
+"""
+Advanced Voice Assistant System
+================================
+Enhanced version with improved architecture, performance, and maintainability.
+Maintains backward compatibility with original functionality.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+import json
+import logging
+import atexit
+import threading
+import subprocess
+from pathlib import Path
+from typing import Optional, List, Dict, Any, Callable
+from dataclasses import dataclass, field
+from enum import Enum, auto
+from time import sleep, time
+from asyncio import run
+from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor
+from queue import Queue, Empty
+
+# Third-party imports
+import mtranslate as mt
+from dotenv import dotenv_values
+
+# Local imports
 from Frontend.GUI import (
     GraphicalUserInterface, SetAssistantStatus, ShowTextToScreen,
     TempDirectoryPath, SetMicrophoneStatus, AnswerModifier,
@@ -9,523 +40,743 @@ from Backend.Automation import Automation
 from Backend.SpeechToText import SpeechRecognition
 from Backend.Chatbot import ChatBot
 from Backend.TextToSpeech import TextToSpeech
-from dotenv import dotenv_values
-from asyncio import run
-from time import sleep
-import subprocess
-import threading
-import json
-import os
-import atexit
-import logging
-import mtranslate as mt
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
 
 # ============================================================================
-# CONSTANTS
+# LOGGING CONFIGURATION
 # ============================================================================
-MIC_ON = "True"
-MIC_OFF = "False"
-STATUS_AVAILABLE = "Available ..."
-STATUS_LISTENING = "Listening ..."
-STATUS_THINKING = "Thinking ..."
-STATUS_SEARCHING = "Searching ..."
-STATUS_ANSWERING = "Answering ..."
-STATUS_SLEEPING = "Sleeping ... (Say 'Sinha' to wake)"
-STATUS_WAKING = "Waking up ..."
-WAKE_WORD = "sinha"
-SLEEP_COMMAND = "sleep"
 
-FUNCTIONS = ["open", "close", "play", "system", "content", "google search", "youtube search"]
-IMAGE_KEYWORDS = ["generate", "create image", "draw", "make image", "picture of"]
-
-# ============================================================================
-# ENVIRONMENT CONFIGURATION
-# ============================================================================
-def load_environment_variables():
-    """Load and validate environment variables from .env file"""
-    try:
-        env_vars = dotenv_values(".env")
-        
-        username = env_vars.get("Username")
-        assistant_name = env_vars.get("Assistantname")
-        input_language = env_vars.get("InputLanguage", "en")
-        
-        if not username:
-            raise ValueError("Username not set in .env file")
-        if not assistant_name:
-            raise ValueError("Assistantname not set in .env file")
-        
-        logger.info(f"Environment loaded: User={username}, Assistant={assistant_name}, Language={input_language}")
-        return username, assistant_name, input_language
+class ColoredFormatter(logging.Formatter):
+    """Custom formatter with color support for terminal output"""
     
-    except Exception as e:
-        logger.error(f"Failed to load environment variables: {e}")
-        raise
+    COLORS = {
+        'DEBUG': '\033[36m',    # Cyan
+        'INFO': '\033[32m',     # Green
+        'WARNING': '\033[33m',  # Yellow
+        'ERROR': '\033[31m',    # Red
+        'CRITICAL': '\033[35m', # Magenta
+        'RESET': '\033[0m'
+    }
 
-Username, Assistantname, InputLanguage = load_environment_variables()
-DefaultMessage = f'''{Username} : Hello {Assistantname}, How are you?
-{Assistantname} : Welcome {Username}. I am doing well. How may i help you?'''
+    def format(self, record):
+        log_color = self.COLORS.get(record.levelname, self.COLORS['RESET'])
+        record.levelname = f"{log_color}{record.levelname}{self.COLORS['RESET']}"
+        return super().format(record)
+
+
+def setup_logging() -> logging.Logger:
+    """Configure advanced logging with file rotation and colored output"""
+    log_dir = Path("logs")
+    log_dir.mkdir(exist_ok=True)
+    
+    logger = logging.getLogger(__name__)
+    logger.setLevel(logging.INFO)
+    
+    # Console handler with colors
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    console_formatter = ColoredFormatter(
+        '%(asctime)s - %(levelname)s - %(message)s',
+        datefmt='%H:%M:%S'
+    )
+    console_handler.setFormatter(console_formatter)
+    
+    # File handler without colors
+    file_handler = logging.FileHandler(log_dir / "assistant.log", encoding='utf-8')
+    file_handler.setLevel(logging.DEBUG)
+    file_formatter = logging.Formatter(
+        '%(asctime)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s'
+    )
+    file_handler.setFormatter(file_formatter)
+    
+    logger.addHandler(console_handler)
+    logger.addHandler(file_handler)
+    
+    return logger
+
+logger = setup_logging()
 
 # ============================================================================
-# GLOBAL STATE MANAGEMENT
+# ENUMS AND CONSTANTS
 # ============================================================================
-current_dir = os.getcwd()
-subprocesses = []
-subprocess_lock = threading.Lock()
 
-# Thread-safe sleep state management
-sleep_lock = threading.Lock()
-is_sleeping = True
+class MicrophoneState(Enum):
+    """Microphone state enumeration"""
+    ON = "True"
+    OFF = "False"
 
-def set_sleep_state(sleeping):
-    """Thread-safe setter for sleep state"""
-    global is_sleeping
-    with sleep_lock:
-        is_sleeping = sleeping
-        logger.info(f"Sleep state changed to: {sleeping}")
 
-def get_sleep_state():
-    """Thread-safe getter for sleep state"""
-    with sleep_lock:
-        return is_sleeping
+class AssistantStatus(Enum):
+    """Assistant status enumeration"""
+    AVAILABLE = "Available ..."
+    LISTENING = "Listening ..."
+    THINKING = "Thinking ..."
+    SEARCHING = "Searching ..."
+    ANSWERING = "Answering ..."
+    SLEEPING = "Sleeping ... (Say 'Sinha' to wake)"
+    WAKING = "Waking up ..."
+
+
+class QueryType(Enum):
+    """Query classification types"""
+    GENERAL = auto()
+    REALTIME = auto()
+    AUTOMATION = auto()
+    IMAGE_GENERATION = auto()
+    EXIT = auto()
+
+
+@dataclass
+class Constants:
+    """Application constants"""
+    WAKE_WORD: str = "sinha"
+    SLEEP_COMMAND: str = "sleep"
+    
+    FUNCTIONS: List[str] = field(default_factory=lambda: [
+        "open", "close", "play", "system", "content", 
+        "google search", "youtube search"
+    ])
+    
+    IMAGE_KEYWORDS: List[str] = field(default_factory=lambda: [
+        "generate", "create image", "draw", "make image", "picture of"
+    ])
+    
+    QUERY_TIMEOUT: float = 5.0
+    RESPONSE_DELAY: float = 0.1
+    MAX_RETRIES: int = 3
+
+CONST = Constants()
 
 # ============================================================================
-# CLEANUP HANDLERS
+# CONFIGURATION MANAGEMENT
 # ============================================================================
-def cleanup_subprocesses():
-    """Cleanup all running subprocesses on exit"""
-    with subprocess_lock:
-        for proc in subprocesses:
-            try:
-                if proc.poll() is None:  # Still running
-                    logger.info(f"Terminating subprocess PID: {proc.pid}")
-                    proc.terminate()
-                    proc.wait(timeout=5)
-            except Exception as e:
-                logger.error(f"Error cleaning up subprocess: {e}")
+
+@dataclass
+class AppConfig:
+    """Application configuration"""
+    username: str
+    assistant_name: str
+    input_language: str = "en"
+    
+    @classmethod
+    def from_env(cls, env_path: str = ".env") -> AppConfig:
+        """Load configuration from environment file"""
+        try:
+            env_vars = dotenv_values(env_path)
+            
+            username = env_vars.get("Username")
+            assistant_name = env_vars.get("Assistantname")
+            input_language = env_vars.get("InputLanguage", "en")
+            
+            if not username:
+                raise ValueError("Username not set in .env file")
+            if not assistant_name:
+                raise ValueError("Assistantname not set in .env file")
+            
+            logger.info(f"✓ Config loaded: User={username}, Assistant={assistant_name}, Lang={input_language}")
+            return cls(username, assistant_name, input_language)
+        
+        except Exception as e:
+            logger.error(f"Failed to load configuration: {e}")
+            raise
+    
+    @property
+    def default_message(self) -> str:
+        """Generate default welcome message"""
+        return (
+            f'{self.username} : Hello {self.assistant_name}, How are you?\n'
+            f'{self.assistant_name} : Welcome {self.username}. I am doing well. How may I help you?'
+        )
+
+
+# ============================================================================
+# STATE MANAGEMENT
+# ============================================================================
+
+class ThreadSafeState:
+    """Thread-safe state manager"""
+    
+    def __init__(self):
+        self._lock = threading.RLock()
+        self._sleep_state = True
+        self._processing = False
+        self._subprocesses: List[subprocess.Popen] = []
+    
+    @contextmanager
+    def lock(self):
+        """Context manager for state locking"""
+        self._lock.acquire()
+        try:
+            yield
+        finally:
+            self._lock.release()
+    
+    @property
+    def is_sleeping(self) -> bool:
+        with self._lock:
+            return self._sleep_state
+    
+    @is_sleeping.setter
+    def is_sleeping(self, value: bool):
+        with self._lock:
+            self._sleep_state = value
+            logger.info(f"Sleep state → {value}")
+    
+    @property
+    def is_processing(self) -> bool:
+        with self._lock:
+            return self._processing
+    
+    @is_processing.setter
+    def is_processing(self, value: bool):
+        with self._lock:
+            self._processing = value
+    
+    def add_subprocess(self, proc: subprocess.Popen):
+        with self._lock:
+            self._subprocesses.append(proc)
+    
+    def cleanup_subprocesses(self):
+        """Clean up all running subprocesses"""
+        with self._lock:
+            for proc in self._subprocesses:
                 try:
-                    proc.kill()
-                except:
-                    pass
+                    if proc.poll() is None:
+                        logger.info(f"Terminating subprocess PID: {proc.pid}")
+                        proc.terminate()
+                        proc.wait(timeout=5)
+                except Exception as e:
+                    logger.error(f"Error cleaning up subprocess: {e}")
+                    try:
+                        proc.kill()
+                    except:
+                        pass
+            self._subprocesses.clear()
 
-atexit.register(cleanup_subprocesses)
-
-# ============================================================================
-# TRANSLATION
-# ============================================================================
-def universal_translator(text):
-    """Translate text into the specified input language"""
-    if InputLanguage == "en" or not text:
-        return text
-    
-    try:
-        translated_text = mt.translate(text, InputLanguage, "auto")
-        return translated_text.capitalize()
-    except Exception as e:
-        logger.error(f"Translation error: {e}")
-        return text
+state = ThreadSafeState()
 
 # ============================================================================
 # FILE OPERATIONS
 # ============================================================================
-def ensure_directory_exists(directory):
-    """Create directory if it doesn't exist"""
-    try:
-        os.makedirs(directory, exist_ok=True)
-    except Exception as e:
-        logger.error(f"Failed to create directory {directory}: {e}")
 
-def read_chatlog_json():
-    """Read and parse the chat log JSON file"""
-    chatlog_path = os.path.join(current_dir, 'Data', 'ChatLog.json')
+class FileManager:
+    """Advanced file operations manager"""
     
-    try:
-        ensure_directory_exists(os.path.dirname(chatlog_path))
+    def __init__(self, config: AppConfig):
+        self.config = config
+        self.base_dir = Path.cwd()
+        self.data_dir = self.base_dir / "Data"
+        self.temp_dir = Path(TempDirectoryPath(''))
         
-        if not os.path.exists(chatlog_path):
-            logger.warning("ChatLog.json not found, creating empty log")
-            with open(chatlog_path, 'w', encoding='utf-8') as file:
-                json.dump([], file)
-            return []
-        
-        with open(chatlog_path, 'r', encoding='utf-8') as file:
-            chatlog_data = json.load(file)
-            return chatlog_data
+    def ensure_directory(self, directory: Path) -> bool:
+        """Create directory if it doesn't exist"""
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+            return True
+        except Exception as e:
+            logger.error(f"Failed to create directory {directory}: {e}")
+            return False
     
-    except json.JSONDecodeError as e:
-        logger.error(f"Corrupted ChatLog.json: {e}")
-        return []
-    except Exception as e:
-        logger.error(f"Error reading ChatLog.json: {e}")
-        return []
-
-def show_default_chat_if_no_chats():
-    """Display default chat message if no chat history exists, without overwriting existing data"""
-    try:
-        database_path = TempDirectoryPath('Database.data')
-        responses_path = TempDirectoryPath('Responses.data')
-
-        # Check if Database.data exists and has content
-        if os.path.exists(database_path):
-            with open(database_path, 'r', encoding='utf-8') as file:
-                data = file.read()
+    def read_json(self, filepath: Path, default: Any = None) -> Any:
+        """Safely read JSON file with fallback"""
+        try:
+            self.ensure_directory(filepath.parent)
             
-            if len(data.strip()) > 0:
-                # There is already chat history, no need to show default message
-                logger.info("Chat history exists, skipping default message")
-                return
-
-        # If Database.data does not exist or is empty, show default message safely
-        ensure_directory_exists(os.path.dirname(database_path))
+            if not filepath.exists():
+                logger.warning(f"{filepath.name} not found, creating empty")
+                with open(filepath, 'w', encoding='utf-8') as f:
+                    json.dump(default or [], f)
+                return default or []
+            
+            with open(filepath, 'r', encoding='utf-8') as f:
+                return json.load(f)
         
-        with open(database_path, 'w', encoding='utf-8') as file:
-            file.write("")  # Keep Database.data empty initially
-
-        with open(responses_path, 'w', encoding='utf-8') as file:
-            file.write(DefaultMessage)  # Write default message to display
-
-        logger.info("No chat history found, displaying default message")
-
-    except Exception as e:
-        logger.error(f"Error in show_default_chat_if_no_chats: {e}")
-
-
-def chatlog_integration():
-    """Convert JSON chat log to formatted text for display"""
-    try:
-        json_data = read_chatlog_json()
-        formatted_chatlog = ""
+        except json.JSONDecodeError as e:
+            logger.error(f"Corrupted JSON in {filepath}: {e}")
+            return default or []
+        except Exception as e:
+            logger.error(f"Error reading {filepath}: {e}")
+            return default or []
+    
+    def write_text(self, filepath: Path, content: str) -> bool:
+        """Write text to file safely"""
+        try:
+            self.ensure_directory(filepath.parent)
+            with open(filepath, 'w', encoding='utf-8') as f:
+                f.write(content)
+            return True
+        except Exception as e:
+            logger.error(f"Error writing to {filepath}: {e}")
+            return False
+    
+    def read_text(self, filepath: Path, default: str = "") -> str:
+        """Read text from file with fallback"""
+        try:
+            if not filepath.exists():
+                return default
+            with open(filepath, 'r', encoding='utf-8') as f:
+                return f.read()
+        except Exception as e:
+            logger.error(f"Error reading {filepath}: {e}")
+            return default
+    
+    def get_chatlog_data(self) -> List[Dict[str, str]]:
+        """Read chat log JSON"""
+        return self.read_json(self.data_dir / 'ChatLog.json', [])
+    
+    def format_chatlog(self) -> str:
+        """Convert JSON chat log to formatted text"""
+        json_data = self.get_chatlog_data()
+        formatted = []
         
         for entry in json_data:
             role = entry.get("role", "")
             content = entry.get("content", "")
             
             if role == "user":
-                formatted_chatlog += f"{Username} : {content}\n"
+                formatted.append(f"{self.config.username} : {content}")
             elif role == "assistant":
-                formatted_chatlog += f"{Assistantname} : {content}\n"
+                formatted.append(f"{self.config.assistant_name} : {content}")
         
-        with open(TempDirectoryPath('Database.data'), 'w', encoding='utf-8') as file:
-            file.write(AnswerModifier(formatted_chatlog))
-        
-        logger.info("Chat log integration completed")
-    
-    except Exception as e:
-        logger.error(f"Error in chatlog_integration: {e}")
+        return '\n'.join(formatted)
 
-def show_chats_on_gui():
-    """Display chat history on the GUI"""
-    try:
-        database_path = TempDirectoryPath('Database.data')
-        
-        if not os.path.exists(database_path):
-            logger.warning("Database.data not found")
-            return
-        
-        with open(database_path, "r", encoding='utf-8') as file:
-            data = file.read()
-        
-        if len(str(data)) > 0:
-            lines = data.split('\n')
-            result = '\n'.join(lines)
-            
-            with open(TempDirectoryPath('Responses.data'), "w", encoding='utf-8') as file:
-                file.write(result)
-            
-            logger.info("Chat history displayed on GUI")
-    
-    except Exception as e:
-        logger.error(f"Error in show_chats_on_gui: {e}")
 
 # ============================================================================
-# ANSWER DISPLAY (Centralized)
+# TRANSLATION SERVICE
 # ============================================================================
-def display_answer(answer):
-    """Centralized function to display and speak answers with translation"""
-    try:
-        if InputLanguage != "en":
-            answer = universal_translator(answer)
-        
-        ShowTextToScreen(f" {Assistantname} : {answer}")
-        SetAssistantStatus(STATUS_ANSWERING)
-        TextToSpeech(answer)
-        
-        return True
+
+class TranslationService:
+    """Translation service with caching"""
     
-    except Exception as e:
-        logger.error(f"Error in display_answer: {e}")
-        return False
+    def __init__(self, target_language: str):
+        self.target_language = target_language
+        self._cache: Dict[str, str] = {}
+    
+    def translate(self, text: str) -> str:
+        """Translate text with caching"""
+        if self.target_language == "en" or not text:
+            return text
+        
+        # Check cache
+        if text in self._cache:
+            return self._cache[text]
+        
+        try:
+            translated = mt.translate(text, self.target_language, "auto")
+            result = translated.capitalize()
+            self._cache[text] = result
+            return result
+        except Exception as e:
+            logger.error(f"Translation error: {e}")
+            return text
+
 
 # ============================================================================
-# IMAGE GENERATION
+# QUERY PROCESSOR
 # ============================================================================
-def start_image_generation(query):
-    """Start image generation subprocess"""
-    try:
-        image_data_path = os.path.join('Frontend', 'Files', 'ImageGeneration.data')
-        ensure_directory_exists(os.path.dirname(image_data_path))
-        
-        with open(image_data_path, "w", encoding='utf-8') as file:
-            file.write(f"{query},True")
-        
-        logger.info(f"Image generation data written: {query}")
-        
-        image_script = os.path.join('Backend', 'ImageGeneration.py')
-        
-        if not os.path.exists(image_script):
-            logger.error(f"ImageGeneration.py not found at {image_script}")
-            return False
-        
-        proc = subprocess.Popen(
-            ['python', image_script],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            stdin=subprocess.PIPE,
-            shell=False
-        )
-        
-        with subprocess_lock:
-            subprocesses.append(proc)
-        
-        logger.info(f"ImageGeneration.py subprocess started (PID: {proc.pid})")
-        return True
-    
-    except Exception as e:
-        logger.error(f"Error starting ImageGeneration.py: {e}")
-        return False
 
-# ============================================================================
-# INITIALIZATION
-# ============================================================================
-def initial_execution():
-    """Initialize the assistant on startup"""
-    try:
-        logger.info("Starting initial execution")
-        
-        SetMicrophoneStatus(MIC_OFF)
-        ShowTextToScreen("")
-        show_default_chat_if_no_chats()
-        chatlog_integration()
-        show_chats_on_gui()
-        SetAssistantStatus(STATUS_SLEEPING)
-        
-        logger.info("Initial execution completed - System in sleep mode")
+class QueryProcessor:
+    """Advanced query processing and classification"""
     
-    except Exception as e:
-        logger.error(f"Error in initial_execution: {e}")
-
-# ============================================================================
-# WAKE WORD DETECTION (FIXED)
-# ============================================================================
-def listen_for_wake_word():
-    """Listen for wake word when in sleep mode - NO MORE FORCED MIC OFF"""
-    try:
-        SetAssistantStatus(STATUS_SLEEPING)
-        query = SpeechRecognition()
-        
-        if not query:
-            return False
-        
-        query_lower = query.strip().lower()
-        logger.info(f"Wake word listening heard: '{query}'")
-        
-        if WAKE_WORD in query_lower:
-            set_sleep_state(False)
-            SetMicrophoneStatus(MIC_ON)
-            SetAssistantStatus(STATUS_WAKING)
-            
-            wake_message = "Yes, I'm awake now!"
-            display_answer(wake_message)
-            
-            logger.info("Wake word detected - Assistant activated")
-            return True
-        
-        return False
+    def __init__(self, config: AppConfig):
+        self.config = config
     
-    except Exception as e:
-        logger.error(f"Error in listen_for_wake_word: {e}")
-        return False
-
-# ============================================================================
-# MAIN EXECUTION LOGIC
-# ============================================================================
-def main_execution():
-    """Main logic for processing user queries"""
-    try:
-        task_execution = False
-        image_execution = False
-        image_generation_query = ""
+    def classify_query(self, decision: List[str]) -> Dict[str, Any]:
+        """Classify query into structured data"""
+        classification = {
+            'has_general': False,
+            'has_realtime': False,
+            'has_automation': False,
+            'has_image_gen': False,
+            'has_exit': False,
+            'merged_query': '',
+            'image_query': '',
+            'automation_items': []
+        }
         
-        SetAssistantStatus(STATUS_LISTENING)
-        query = SpeechRecognition()
+        # Check for different query types
+        general_queries = [i for i in decision if i.startswith("general")]
+        realtime_queries = [i for i in decision if i.startswith("realtime")]
         
-        if GetMicrophoneStatus() != MIC_ON:
-            return False
+        classification['has_general'] = bool(general_queries)
+        classification['has_realtime'] = bool(realtime_queries)
         
-        if not query:
-            return False
+        # Merge general and realtime queries
+        if general_queries or realtime_queries:
+            merged = " and ".join(
+                [" ".join(i.split()[1:]) for i in (general_queries + realtime_queries)]
+            )
+            classification['merged_query'] = merged
         
-        if SLEEP_COMMAND in query.lower():
-            set_sleep_state(True)
-            SetMicrophoneStatus(MIC_OFF)
-            
-            sleep_message = "Going to sleep. Say 'Sinha' to wake me up."
-            ShowTextToScreen(f" {Assistantname} : {sleep_message}")
-            SetAssistantStatus(STATUS_ANSWERING)
-            TextToSpeech(sleep_message)
-            
-            logger.info("Sleep command received - Entering sleep mode")
-            return True
-        
-        ShowTextToScreen(f" {Username} : {query}")
-        SetAssistantStatus(STATUS_THINKING)
-        
-        decision = FirstLayerDMM(query)
-        logger.info(f"Decision: {decision}")
-        
-        has_general = any(i for i in decision if i.startswith("general"))
-        has_realtime = any(i for i in decision if i.startswith("realtime"))
-        
-        merged_query = " and ".join(
-            [" ".join(i.split()[1:]) for i in decision 
-             if i.startswith("general") or i.startswith("realtime")]
-        )
-        
-        for query_item in decision:
-            if any(keyword in query_item.lower() for keyword in IMAGE_KEYWORDS):
-                image_generation_query = str(query_item)
-                image_execution = True
-                logger.info(f"Image generation detected: {image_generation_query}")
+        # Check for image generation
+        for item in decision:
+            if any(keyword in item.lower() for keyword in CONST.IMAGE_KEYWORDS):
+                classification['has_image_gen'] = True
+                classification['image_query'] = item
                 break
         
-        for query_item in decision:
-            if not task_execution:
-                if any(query_item.startswith(func) for func in FUNCTIONS):
-                    run(Automation(list(decision)))
-                    task_execution = True
-                    break
+        # Check for automation
+        automation_items = [
+            item for item in decision 
+            if any(item.startswith(func) for func in CONST.FUNCTIONS)
+        ]
+        if automation_items:
+            classification['has_automation'] = True
+            classification['automation_items'] = automation_items
         
-        if image_execution:
-            start_image_generation(image_generation_query)
+        # Check for exit
+        classification['has_exit'] = any("exit" in item for item in decision)
         
-        if (has_general and has_realtime) or has_realtime:
-            SetAssistantStatus(STATUS_SEARCHING)
-            answer = RealtimeSearchEngine(merged_query)
-            display_answer(answer)
+        return classification
+
+
+# ============================================================================
+# ASSISTANT ENGINE
+# ============================================================================
+
+class AssistantEngine:
+    """Main assistant processing engine"""
+    
+    def __init__(self, config: AppConfig):
+        self.config = config
+        self.file_manager = FileManager(config)
+        self.translator = TranslationService(config.input_language)
+        self.query_processor = QueryProcessor(config)
+        self.response_queue = Queue()
+    
+    def initialize(self):
+        """Initialize the assistant"""
+        logger.info("Initializing assistant...")
+        
+        SetMicrophoneStatus(MicrophoneState.OFF.value)
+        ShowTextToScreen("")
+        
+        # Setup default chat if needed
+        database_path = Path(TempDirectoryPath('Database.data'))
+        responses_path = Path(TempDirectoryPath('Responses.data'))
+        
+        if not database_path.exists() or database_path.stat().st_size == 0:
+            self.file_manager.write_text(database_path, "")
+            self.file_manager.write_text(responses_path, self.config.default_message)
+            logger.info("No chat history - displaying default message")
+        else:
+            # Load existing chat log
+            formatted_log = self.file_manager.format_chatlog()
+            if formatted_log:
+                self.file_manager.write_text(database_path, AnswerModifier(formatted_log))
+                self.display_chat_history()
+        
+        SetAssistantStatus(AssistantStatus.SLEEPING.value)
+        logger.info("✓ Initialization complete - System in sleep mode")
+    
+    def display_chat_history(self):
+        """Display chat history on GUI"""
+        try:
+            database_path = Path(TempDirectoryPath('Database.data'))
+            data = self.file_manager.read_text(database_path)
+            
+            if data:
+                self.file_manager.write_text(
+                    Path(TempDirectoryPath('Responses.data')), 
+                    data
+                )
+                logger.debug("Chat history displayed")
+        except Exception as e:
+            logger.error(f"Error displaying chat history: {e}")
+    
+    def display_answer(self, answer: str) -> bool:
+        """Display and speak answer with translation"""
+        try:
+            # Translate if needed
+            if self.config.input_language != "en":
+                answer = self.translator.translate(answer)
+            
+            # Display on screen
+            ShowTextToScreen(f" {self.config.assistant_name} : {answer}")
+            SetAssistantStatus(AssistantStatus.ANSWERING.value)
+            
+            # Speak
+            TextToSpeech(answer)
+            
             return True
         
-        for query_item in decision:
-            if "general" in query_item:
-                SetAssistantStatus(STATUS_THINKING)
-                query_final = query_item.replace("general", "").strip()
-                logger.info(f"General query: {query_final}")
+        except Exception as e:
+            logger.error(f"Error in display_answer: {e}")
+            return False
+    
+    def start_image_generation(self, query: str) -> bool:
+        """Start image generation subprocess"""
+        try:
+            image_data_path = Path('Frontend') / 'Files' / 'ImageGeneration.data'
+            self.file_manager.ensure_directory(image_data_path.parent)
+            
+            with open(image_data_path, "w", encoding='utf-8') as f:
+                f.write(f"{query},True")
+            
+            logger.info(f"Image generation initiated: {query}")
+            
+            image_script = Path('Backend') / 'ImageGeneration.py'
+            
+            if not image_script.exists():
+                logger.error(f"ImageGeneration.py not found")
+                return False
+            
+            proc = subprocess.Popen(
+                [sys.executable, str(image_script)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                stdin=subprocess.PIPE
+            )
+            
+            state.add_subprocess(proc)
+            logger.info(f"✓ Image generation started (PID: {proc.pid})")
+            return True
+        
+        except Exception as e:
+            logger.error(f"Error starting image generation: {e}")
+            return False
+    
+    def listen_for_wake_word(self) -> bool:
+        """Listen for wake word in sleep mode"""
+        try:
+            SetAssistantStatus(AssistantStatus.SLEEPING.value)
+            query = SpeechRecognition()
+            
+            if not query:
+                return False
+            
+            query_lower = query.strip().lower()
+            logger.debug(f"Wake listener heard: '{query}'")
+            
+            if CONST.WAKE_WORD in query_lower:
+                state.is_sleeping = False
+                SetMicrophoneStatus(MicrophoneState.ON.value)
+                SetAssistantStatus(AssistantStatus.WAKING.value)
+                
+                self.display_answer("Yes, I'm awake now!")
+                logger.info("✓ Wake word detected - Assistant activated")
+                return True
+            
+            return False
+        
+        except Exception as e:
+            logger.error(f"Error in wake word detection: {e}")
+            return False
+    
+    def process_query(self) -> bool:
+        """Main query processing logic"""
+        try:
+            # Listen for query
+            SetAssistantStatus(AssistantStatus.LISTENING.value)
+            query = SpeechRecognition()
+            
+            if GetMicrophoneStatus() != MicrophoneState.ON.value:
+                return False
+            
+            if not query:
+                return False
+            
+            # Check for sleep command
+            if CONST.SLEEP_COMMAND in query.lower():
+                state.is_sleeping = True
+                SetMicrophoneStatus(MicrophoneState.OFF.value)
+                
+                self.display_answer("Going to sleep. Say 'Sinha' to wake me up.")
+                logger.info("Sleep command - Entering sleep mode")
+                return True
+            
+            # Display user query
+            ShowTextToScreen(f" {self.config.username} : {query}")
+            SetAssistantStatus(AssistantStatus.THINKING.value)
+            
+            # Get decision from DMM
+            decision = FirstLayerDMM(query)
+            logger.info(f"DMM Decision: {decision}")
+            
+            # Classify the query
+            classification = self.query_processor.classify_query(decision)
+            
+            # Handle image generation
+            if classification['has_image_gen']:
+                self.start_image_generation(classification['image_query'])
+            
+            # Handle automation
+            if classification['has_automation']:
+                run(Automation(list(decision)))
+            
+            # Handle realtime search
+            if classification['has_realtime'] or (
+                classification['has_general'] and classification['has_realtime']
+            ):
+                SetAssistantStatus(AssistantStatus.SEARCHING.value)
+                answer = RealtimeSearchEngine(classification['merged_query'])
+                self.display_answer(answer)
+                return True
+            
+            # Handle general queries
+            if classification['has_general']:
+                SetAssistantStatus(AssistantStatus.THINKING.value)
+                query_final = classification['merged_query']
+                logger.info(f"Processing general query: {query_final}")
                 
                 answer = ChatBot(query_final)
-                display_answer(answer)
+                self.display_answer(answer)
                 return True
             
-            elif "realtime" in query_item:
-                SetAssistantStatus(STATUS_SEARCHING)
-                query_final = query_item.replace("realtime", "").strip()
-                
-                answer = RealtimeSearchEngine(QueryModifier(query_final))
-                display_answer(answer)
-                return True
-            
-            elif "exit" in query_item:
-                exit_message = "Okay, Bye!"
-                display_answer(exit_message)
-                
+            # Handle exit
+            if classification['has_exit']:
+                self.display_answer("Okay, Bye!")
                 logger.info("Exit command received")
-                cleanup_subprocesses()
+                state.cleanup_subprocesses()
                 os._exit(0)
+            
+            return False
         
-        return False
-    
-    except Exception as e:
-        logger.error(f"Error in main_execution: {e}")
-        return False
+        except Exception as e:
+            logger.error(f"Error processing query: {e}")
+            return False
+
 
 # ============================================================================
-# THREADING
+# THREADING MANAGER
 # ============================================================================
-def first_thread():
-    """Main thread for handling voice commands and wake word detection"""
-    logger.info("First thread started")
+
+class ThreadManager:
+    """Manage assistant threads with executor"""
     
-    while True:
+    def __init__(self, engine: AssistantEngine):
+        self.engine = engine
+        self.executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="Assistant")
+        self.running = True
+    
+    def voice_processing_loop(self):
+        """Main voice processing thread"""
+        logger.info("Voice processing thread started")
+        
+        while self.running:
+            try:
+                if state.is_sleeping:
+                    # Check for manual wake-up via GUI
+                    if GetMicrophoneStatus() == MicrophoneState.ON.value:
+                        state.is_sleeping = False
+                        SetAssistantStatus(AssistantStatus.WAKING.value)
+                        self.engine.display_answer("Yes, I'm awake now!")
+                        logger.info("Manual wake-up via GUI")
+                    else:
+                        self.engine.listen_for_wake_word()
+                else:
+                    # Process queries when awake
+                    if GetMicrophoneStatus() == MicrophoneState.ON.value:
+                        self.engine.process_query()
+                    else:
+                        # Set to available if not already
+                        current_status = GetAssistantStatus()
+                        if AssistantStatus.AVAILABLE.value not in current_status:
+                            SetAssistantStatus(AssistantStatus.AVAILABLE.value)
+                        sleep(CONST.RESPONSE_DELAY)
+            
+            except KeyboardInterrupt:
+                logger.info("Voice thread interrupted")
+                break
+            except Exception as e:
+                logger.error(f"Error in voice processing: {e}")
+                sleep(CONST.RESPONSE_DELAY)
+    
+    def gui_loop(self):
+        """GUI thread"""
         try:
-            if get_sleep_state():
-                # NEW: Allow manual wake-up via GUI mic button
-                if GetMicrophoneStatus() == MIC_ON:
-                    set_sleep_state(False)
-                    SetAssistantStatus(STATUS_WAKING)
-                    display_answer("Yes, I'm awake now!")
-                    logger.info("Manual wake-up via GUI microphone button")
-                else:
-                    listen_for_wake_word()
-            else:
-                current_status = GetMicrophoneStatus()
-                
-                if current_status == MIC_ON:
-                    main_execution()
-                else:
-                    ai_status = GetAssistantStatus()
-                    if STATUS_AVAILABLE not in ai_status:
-                        SetAssistantStatus(STATUS_AVAILABLE)
-                    sleep(0.1)
+            logger.info("Starting GUI thread")
+            GraphicalUserInterface()
+        except Exception as e:
+            logger.error(f"Error in GUI thread: {e}")
+    
+    def start(self):
+        """Start all threads"""
+        # Start voice processing in executor
+        voice_future = self.executor.submit(self.voice_processing_loop)
+        
+        # Run GUI in main thread (required for tkinter)
+        self.gui_loop()
+        
+        # Cleanup
+        self.running = False
+        self.executor.shutdown(wait=True)
+    
+    def shutdown(self):
+        """Shutdown all threads"""
+        self.running = False
+        self.executor.shutdown(wait=False)
+
+
+# ============================================================================
+# APPLICATION
+# ============================================================================
+
+class VoiceAssistantApp:
+    """Main application class"""
+    
+    def __init__(self):
+        self.config = AppConfig.from_env()
+        self.engine = AssistantEngine(self.config)
+        self.thread_manager = ThreadManager(self.engine)
+        
+        # Register cleanup
+        atexit.register(self.cleanup)
+    
+    def cleanup(self):
+        """Cleanup resources on exit"""
+        logger.info("Cleaning up resources...")
+        state.cleanup_subprocesses()
+        self.thread_manager.shutdown()
+    
+    def run(self):
+        """Run the application"""
+        try:
+            self._print_banner()
+            
+            # Initialize
+            self.engine.initialize()
+            
+            # Print startup info
+            print("\n" + "=" * 60)
+            print("System started in SLEEP MODE")
+            print(f"Say '{CONST.WAKE_WORD.upper()}' to wake the assistant")
+            print("Or click the microphone button in GUI to wake manually")
+            print("=" * 60 + "\n")
+            
+            # Start threads
+            self.thread_manager.start()
         
         except KeyboardInterrupt:
-            logger.info("Keyboard interrupt received")
-            break
+            logger.info("Application interrupted by user")
         except Exception as e:
-            logger.error(f"Error in first_thread: {e}")
-            sleep(0.1)
+            logger.error(f"Fatal error: {e}", exc_info=True)
+        finally:
+            self.cleanup()
+    
+    def _print_banner(self):
+        """Print startup banner"""
+        banner = f"""
+{'=' * 60}
+🎙️  ADVANCED VOICE ASSISTANT v2.0
+{'=' * 60}
+User: {self.config.username}
+Assistant: {self.config.assistant_name}
+Language: {self.config.input_language}
+{'=' * 60}
+        """
+        print(banner)
+        logger.info("Application starting...")
 
-def second_thread():
-    """Thread for running the graphical user interface"""
-    try:
-        logger.info("Starting GUI thread")
-        GraphicalUserInterface()
-    except Exception as e:
-        logger.error(f"Error in GUI thread: {e}")
 
 # ============================================================================
 # ENTRY POINT
 # ============================================================================
+
+def main():
+    """Application entry point"""
+    app = VoiceAssistantApp()
+    app.run()
+
+
 if __name__ == "__main__":
-    try:
-        logger.info("=" * 60)
-        logger.info("VOICE ASSISTANT STARTING")
-        logger.info(f"User: {Username}, Assistant: {Assistantname}")
-        logger.info(f"Language: {InputLanguage}")
-        logger.info("=" * 60)
-        
-        initial_execution()
-        
-        print("\n" + "=" * 60)
-        print("System started in SLEEP MODE")
-        print(f"Say '{WAKE_WORD.upper()}' to wake the assistant")
-        print("Or click the microphone button in GUI to wake manually")
-        print("=" * 60 + "\n")
-        
-        thread1 = threading.Thread(target=first_thread, daemon=True)
-        thread1.start()
-        
-        second_thread()
-    
-    except KeyboardInterrupt:
-        logger.info("Application interrupted by user")
-        cleanup_subprocesses()
-    except Exception as e:
-        logger.error(f"Fatal error: {e}")
-        cleanup_subprocesses()
-    finally:
-        logger.info("Application shutting down")
+    main()
