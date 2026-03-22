@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🎙️ JARVIS — Advanced AI Voice Assistant
+# 🎙️ SINHA — Advanced AI Voice Assistant
 
 **A full-featured, offline-capable AI desktop assistant powered by Groq, Cohere, and Edge TTS**
 
